@@ -119,3 +119,20 @@ platforms:
     name: "抖音"
   - id: "zhihu"
     name: "知乎"
+
+  # 英文源 (RSS)
+  - id: "bbc-world"
+    name: "BBC World"
+    enabled: true
+    url: "http://feeds.bbci.co.uk/news/world/rss.xml"
+    language: "en"
+  - id: "cnn-top"
+    name: "CNN Top"
+    enabled: true
+    url: "http://rss.cnn.com/rss/edition.rss"
+    language: "en"
+  - id: "reuters-world"
+    name: "Reuters World"
+    enabled: true
+    url: "https://www.reutersagency.com/feed/?best-topics=world&post_type=best"
+    language: "en"

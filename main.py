@@ -468,6 +468,8 @@ class PushRecordManager:
         return result
 
 
+import xml.etree.ElementTree as ET
+
 # === 数据获取 ===
 class DataFetcher:
     """数据获取器"""
@@ -475,7 +477,7 @@ class DataFetcher:
     def __init__(self, proxy_url: Optional[str] = None):
         self.proxy_url = proxy_url
 
-    def fetch_data(
+    def fetch_data_cn(
         self,
         id_info: Union[str, Tuple[str, str]],
         max_retries: int = 2,
@@ -535,9 +537,66 @@ class DataFetcher:
                     return None, id_value, alias
         return None, id_value, alias
 
+    def fetch_data_en(
+        self,
+        id_info: Union[str, Tuple[str, str]],
+        url: str,
+        max_retries: int = 2,
+    ) -> Tuple[Optional[str], str, str]:
+        """获取英文RSS数据"""
+        if isinstance(id_info, tuple):
+            id_value, alias = id_info
+        else:
+            id_value = id_info
+            alias = id_value
+
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        }
+
+        print(f"正在抓取英文源: {alias} ({url})")
+        
+        retries = 0
+        while retries <= max_retries:
+            try:
+                response = requests.get(url, headers=headers, timeout=15)
+                response.raise_for_status()
+                
+                # 解析RSS XML
+                root = ET.fromstring(response.content)
+                items = []
+                
+                # 尝试适配常见的RSS格式 (channel/item 或 entry)
+                for item in root.findall(".//item")[:50]: # 限制数量
+                    title = item.find("title")
+                    link = item.find("link")
+                    
+                    if title is not None and link is not None:
+                        items.append({
+                            "title": title.text,
+                            "url": link.text,
+                            "mobileUrl": link.text
+                        })
+                
+                # 构造统一的返回格式
+                result_data = {
+                    "status": "success",
+                    "items": items
+                }
+                
+                print(f"获取 {id_value} 成功 (RSS items: {len(items)})")
+                return json.dumps(result_data), id_value, alias
+
+            except Exception as e:
+                retries += 1
+                print(f"请求 {id_value} 失败: {e}")
+                time.sleep(2)
+        
+        return None, id_value, alias
+
     def crawl_websites(
         self,
-        ids_list: List[Union[str, Tuple[str, str]]],
+        platforms: List[Dict],
         request_interval: int = CONFIG["REQUEST_INTERVAL"],
     ) -> Tuple[Dict, Dict, List]:
         """爬取多个网站数据"""
@@ -545,15 +604,18 @@ class DataFetcher:
         id_to_name = {}
         failed_ids = []
 
-        for i, id_info in enumerate(ids_list):
-            if isinstance(id_info, tuple):
-                id_value, name = id_info
-            else:
-                id_value = id_info
-                name = id_value
-
+        for i, platform in enumerate(platforms):
+            id_value = platform["id"]
+            name = platform["name"]
+            url = platform.get("url", "")
+            language = platform.get("language", "cn")
+            
             id_to_name[id_value] = name
-            response, _, _ = self.fetch_data(id_info)
+            
+            if language == "en":
+                response, _, _ = self.fetch_data_en((id_value, name), url)
+            else:
+                response, _, _ = self.fetch_data_cn((id_value, name))
 
             if response:
                 try:
@@ -585,7 +647,7 @@ class DataFetcher:
             else:
                 failed_ids.append(id_value)
 
-            if i < len(ids_list) - 1:
+            if i < len(platforms) - 1:
                 actual_interval = request_interval + random.randint(-10, 20)
                 actual_interval = max(50, actual_interval)
                 time.sleep(actual_interval / 1000)
@@ -1511,9 +1573,58 @@ def prepare_report_data(
             }
         )
 
+    # 分离中英文数据
+    cn_stats = []
+    en_stats = []
+    
+    # 构建源语言映射
+    source_lang_map = {}
+    for p in CONFIG["PLATFORMS"]:
+        source_lang_map[p["name"]] = p.get("language", "cn")
+        
+    for stat in processed_stats:
+        cn_titles = []
+        en_titles = []
+        
+        for title in stat["titles"]:
+            lang = source_lang_map.get(title["source_name"], "cn")
+            if lang == "en":
+                en_titles.append(title)
+            else:
+                cn_titles.append(title)
+                
+        if cn_titles:
+            cn_stat = stat.copy()
+            cn_stat["titles"] = cn_titles
+            cn_stat["count"] = sum(t["count"] for t in cn_titles)
+            cn_stats.append(cn_stat)
+            
+        if en_titles:
+            en_stat = stat.copy()
+            en_stat["titles"] = en_titles
+            en_stat["count"] = sum(t["count"] for t in en_titles)
+            en_stats.append(en_stat)
+            
+    # 分离新增数据
+    cn_new = []
+    en_new = []
+    
+    for source in processed_new_titles:
+        lang = source_lang_map.get(source["source_name"], "cn")
+        if lang == "en":
+            en_new.append(source)
+        else:
+            cn_new.append(source)
+
     return {
-        "stats": processed_stats,
-        "new_titles": processed_new_titles,
+        "report_type": "当日汇总" if mode == "daily" else "增量报告",
+        "generated_time": get_beijing_time().strftime("%Y-%m-%d %H:%M"),
+        "stats": processed_stats, # 保持向后兼容
+        "cn_groups": cn_stats,
+        "en_groups": en_stats,
+        "new_titles": processed_new_titles, # 保持向后兼容
+        "cn_new": cn_new,
+        "en_new": en_new,
         "failed_ids": failed_ids or [],
         "total_new_count": sum(
             len(source["titles"]) for source in processed_new_titles
@@ -1722,36 +1833,201 @@ def generate_json_report(
     mode: str = "daily",
     is_daily_summary: bool = False,
     update_info: Optional[Dict] = None,
-) -> str:
-    """生成JSON报告"""
+) -> List[str]:
+    """生成JSON报告 (拆分为中英文)"""
     if is_daily_summary:
         if mode == "current":
-            filename = "当前榜单汇总.json"
+            base_filename = "当前榜单汇总"
         elif mode == "incremental":
-            filename = "当日增量.json"
+            base_filename = "当日增量"
         else:
-            filename = "当日汇总.json"
+            base_filename = "当日汇总"
     else:
-        filename = f"{format_time_filename()}.json"
-
-    file_path = get_output_path("json", filename)
-    ensure_directory_exists(str(Path(file_path).parent))
+        base_filename = format_time_filename()
 
     report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
     
-    # 添加额外元数据
-    report_data["meta"] = {
+    # Common metadata
+    meta = {
         "generated_at": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
         "total_titles": total_titles,
         "mode": mode,
         "is_daily_summary": is_daily_summary,
-        "version": VERSION
+        "version": VERSION,
+        "report_type": report_data.get("report_type", ""),
+        "generated_time": report_data.get("generated_time", "")
     }
 
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(report_data, f, ensure_ascii=False, indent=2)
+    generated_files = []
 
-    return file_path
+    # 1. Generate CN Report
+    cn_data = {
+        "meta": meta,
+        "groups": report_data.get("cn_groups", []),
+        "new_titles": report_data.get("cn_new", []),
+        "failed_ids": report_data.get("failed_ids", []),
+        "language": "cn"
+    }
+    cn_filename = f"{base_filename}_cn.json"
+    cn_path = get_output_path("json", cn_filename)
+    ensure_directory_exists(str(Path(cn_path).parent))
+    
+    with open(cn_path, "w", encoding="utf-8") as f:
+        json.dump(cn_data, f, ensure_ascii=False, indent=2)
+    generated_files.append(cn_path)
+
+    # 2. Generate EN Report
+    en_data = {
+        "meta": meta,
+        "groups": report_data.get("en_groups", []),
+        "new_titles": report_data.get("en_new", []),
+        "failed_ids": report_data.get("failed_ids", []),
+        "language": "en"
+    }
+    en_filename = f"{base_filename}_en.json"
+    en_path = get_output_path("json", en_filename)
+    
+    with open(en_path, "w", encoding="utf-8") as f:
+        json.dump(en_data, f, ensure_ascii=False, indent=2)
+    generated_files.append(en_path)
+
+    return generated_files
+
+
+
+def _render_word_groups(groups: List[Dict], total_titles: int) -> str:
+    """渲染词组列表HTML"""
+    if not groups:
+        return '<div style="padding: 20px; text-align: center; color: #666;">暂无数据</div>'
+        
+    html = ""
+    total_count = len(groups)
+    
+    for i, stat in enumerate(groups, 1):
+        count = stat["count"]
+        
+        # 确定热度等级
+        if count >= 10:
+            count_class = "hot"
+        elif count >= 5:
+            count_class = "warm"
+        else:
+            count_class = ""
+            
+        escaped_word = html_escape(stat["word"])
+        
+        html += f"""
+            <div class="word-group">
+                <div class="word-header">
+                    <div class="word-info">
+                        <div class="word-name">{escaped_word}</div>
+                        <div class="word-count {count_class}">{count} 条</div>
+                    </div>
+                    <div class="word-index">{i}/{total_count}</div>
+                </div>"""
+                
+        # 处理每个词组下的新闻标题
+        for j, title_data in enumerate(stat["titles"], 1):
+            is_new = title_data.get("is_new", False)
+            new_class = "new" if is_new else ""
+            
+            html += f"""
+                <div class="news-item {new_class}">
+                    <div class="news-number">{j}</div>
+                    <div class="news-content">
+                        <div class="news-header">
+                            <span class="source-name">{html_escape(title_data["source_name"])}</span>"""
+                            
+            # 处理排名显示
+            ranks = title_data.get("ranks", [])
+            if ranks:
+                # 只显示前3个排名
+                display_ranks = ranks[:3]
+                for rank in display_ranks:
+                    rank_class = ""
+                    if rank <= 3:
+                        rank_class = "top"
+                    elif rank <= 10:
+                        rank_class = "high"
+                    html += f'<span class="rank-num {rank_class}">{rank}</span>'
+                if len(ranks) > 3:
+                    html += '<span class="rank-num">...</span>'
+                    
+            html += """
+                        </div>
+                        <div class="news-title">"""
+                        
+            # 渲染标题链接
+            link_url = title_data.get("mobile_url") or title_data.get("url")
+            escaped_title = html_escape(title_data["title"])
+            
+            if link_url:
+                escaped_url = html_escape(link_url)
+                html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
+            else:
+                html += escaped_title
+                
+            html += """</div>
+                    </div>
+                </div>"""
+                
+        html += "</div>"
+        
+    return html
+
+
+def _render_new_section(new_titles: List[Dict]) -> str:
+    """渲染新增新闻区域HTML"""
+    if not new_titles:
+        return ""
+        
+    html = """
+        <div class="new-section">
+            <h2 class="new-section-title">🆕 新增上榜</h2>"""
+            
+    for source_data in new_titles:
+        source_name = source_data["source_name"]
+        titles = source_data["titles"]
+        
+        if not titles:
+            continue
+            
+        html += f"""
+            <div class="new-source-group">
+                <div class="new-source-title">{html_escape(source_name)}</div>"""
+                
+        for k, title_data in enumerate(titles, 1):
+            rank = title_data.get("rank", 0)
+            rank_class = ""
+            if rank <= 3:
+                rank_class = "top"
+            elif rank <= 10:
+                rank_class = "high"
+                
+            link_url = title_data.get("mobile_url") or title_data.get("url")
+            escaped_title = html_escape(title_data["title"])
+            
+            html += f"""
+                <div class="new-item">
+                    <div class="new-item-number">{k}</div>
+                    <span class="new-item-rank {rank_class}">{rank}</span>
+                    <div class="news-content">
+                        <div class="news-title">"""
+                        
+            if link_url:
+                escaped_url = html_escape(link_url)
+                html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
+            else:
+                html += escaped_title
+                
+            html += """</div>
+                    </div>
+                </div>"""
+                
+        html += "</div>"
+        
+    html += "</div>"
+    return html
 
 
 def render_html_content(
@@ -1773,32 +2049,74 @@ def render_html_content(
         <style>
             * { box-sizing: border-box; }
             body { 
-                font-family: 'Courier New', Courier, monospace;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
                 margin: 0; 
                 padding: 16px; 
-                background: #050505;
-                color: #00f3ff;
+                background: #f5f7fa;
+                color: #333;
                 line-height: 1.5;
             }
             
             .container {
                 max-width: 600px;
                 margin: 0 auto;
-                background: #0a0a0a;
-                border: 1px solid #00f3ff;
-                border-radius: 4px;
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
                 overflow: hidden;
-                box-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
             }
             
             .header {
-                background: linear-gradient(135deg, #000000 0%, #1a1a1a 100%);
-                border-bottom: 2px solid #ff00ff;
-                color: #ff00ff;
-                padding: 32px 24px;
+                background: #ffffff;
+                border-bottom: 1px solid #e5e7eb;
+                color: #1f2937;
+                padding: 32px 24px 32px; /* Default padding without tabs */
                 text-align: center;
                 position: relative;
-                text-shadow: 0 0 10px rgba(255, 0, 255, 0.5);
+            }
+            
+            .tabs {
+                position: absolute;
+                bottom: 0;
+                left: 0;
+                width: 100%;
+                display: none; /* Hidden by default for email compatibility */
+                justify-content: center;
+                gap: 24px;
+                padding: 0 24px;
+            }
+            
+            .tab-btn {
+                background: transparent;
+                border: none;
+                border-bottom: 2px solid transparent;
+                color: #6b7280;
+                padding: 12px 4px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 500;
+                transition: all 0.2s ease;
+            }
+            
+            .tab-btn:hover {
+                color: #2563eb;
+            }
+            
+            .tab-btn.active {
+                color: #2563eb;
+                border-bottom: 2px solid #2563eb;
+            }
+            
+            .tab-content {
+                display: block; /* Visible by default for email compatibility */
+                animation: fadeIn 0.3s ease;
+                margin-bottom: 40px;
+            }
+            
+            @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(5px); }
+                to { opacity: 1; transform: translateY(0); }
             }
             
             .save-buttons {
@@ -1810,38 +2128,28 @@ def render_html_content(
             }
             
             .save-btn {
-                background: rgba(0, 0, 0, 0.8);
-                border: 1px solid #00f3ff;
-                color: #00f3ff;
-                padding: 8px 16px;
-                border-radius: 2px;
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                color: #374151;
+                padding: 6px 12px;
+                border-radius: 4px;
                 cursor: pointer;
-                font-size: 13px;
+                font-size: 12px;
                 font-weight: 500;
                 transition: all 0.2s ease;
-                backdrop-filter: blur(10px);
-                white-space: nowrap;
             }
             
             .save-btn:hover {
-                background: rgba(0, 243, 255, 0.1);
-                box-shadow: 0 0 10px rgba(0, 243, 255, 0.3);
-                transform: translateY(-1px);
-            }
-            
-            .save-btn:active {
-                transform: translateY(0);
-            }
-            
-            .save-btn:disabled {
-                opacity: 0.6;
-                cursor: not-allowed;
+                background: #f3f4f6;
+                border-color: #9ca3af;
+                color: #111827;
             }
             
             .header-title {
-                font-size: 22px;
+                font-size: 24px;
                 font-weight: 700;
                 margin: 0 0 20px 0;
+                color: #111827;
             }
             
             .header-info {
@@ -1849,7 +2157,7 @@ def render_html_content(
                 grid-template-columns: 1fr 1fr;
                 gap: 16px;
                 font-size: 14px;
-                opacity: 0.95;
+                color: #6b7280;
             }
             
             .info-item {
@@ -1859,15 +2167,13 @@ def render_html_content(
             .info-label {
                 display: block;
                 font-size: 12px;
-                opacity: 0.8;
                 margin-bottom: 4px;
             }
             
             .info-value {
                 font-weight: 600;
                 font-size: 16px;
-                color: #fff;
-                text-shadow: 0 0 5px rgba(255, 255, 255, 0.5);
+                color: #111827;
             }
             
             .content {
@@ -1887,8 +2193,8 @@ def render_html_content(
                 align-items: center;
                 justify-content: space-between;
                 margin-bottom: 20px;
-                padding-bottom: 8px;
-                border-bottom: 1px solid #333;
+                padding-bottom: 12px;
+                border-bottom: 2px solid #f3f4f6;
             }
             
             .word-info {
@@ -1898,73 +2204,70 @@ def render_html_content(
             }
             
             .word-name {
-                font-size: 17px;
+                font-size: 18px;
                 font-weight: 600;
-                color: #00f3ff;
-                text-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
+                color: #111827;
             }
             
             .word-count {
-                color: #ff00ff;
+                color: #6b7280;
                 font-size: 13px;
                 font-weight: 500;
+                background: #f3f4f6;
+                padding: 2px 8px;
+                border-radius: 12px;
             }
             
-            .word-count.hot { color: #ff0055; font-weight: 600; text-shadow: 0 0 5px rgba(255, 0, 85, 0.5); }
-            .word-count.warm { color: #ff00ff; font-weight: 600; }
+            .word-count.hot { color: #dc2626; background: #fee2e2; }
+            .word-count.warm { color: #ea580c; background: #ffedd5; }
             
             .word-index {
-                color: #666;
+                color: #9ca3af;
                 font-size: 12px;
             }
             
             .news-item {
-                margin-bottom: 20px;
-                padding: 16px 0;
-                border-bottom: 1px solid #1a1a1a;
+                margin-bottom: 16px;
+                padding: 12px;
+                border-radius: 6px;
+                background: #f9fafb;
                 position: relative;
                 display: flex;
                 gap: 12px;
-                align-items: center;
+                align-items: flex-start;
+                transition: background 0.2s ease;
             }
             
-            .news-item:last-child {
-                border-bottom: none;
+            .news-item:hover {
+                background: #f3f4f6;
+            }
+            
+            .news-item.new {
+                background: #eff6ff;
+                border: 1px solid #dbeafe;
             }
             
             .news-item.new::after {
                 content: "NEW";
                 position: absolute;
                 top: 12px;
-                right: 0;
-                background: #ff00ff;
-                color: #000;
-                font-size: 9px;
+                right: 12px;
+                background: #2563eb;
+                color: #fff;
+                font-size: 10px;
                 font-weight: 700;
-                padding: 3px 6px;
-                border-radius: 2px;
-                letter-spacing: 0.5px;
-                box-shadow: 0 0 10px rgba(255, 0, 255, 0.5);
+                padding: 2px 6px;
+                border-radius: 4px;
             }
             
             .news-number {
-                color: #00f3ff;
+                color: #6b7280;
                 font-size: 13px;
                 font-weight: 600;
                 min-width: 20px;
                 text-align: center;
                 flex-shrink: 0;
-                background: rgba(0, 243, 255, 0.1);
-                border: 1px solid #00f3ff;
-                border-radius: 50%;
-                width: 24px;
-                height: 24px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                align-self: flex-start;
-                margin-top: 8px;
-                box-shadow: 0 0 5px rgba(0, 243, 255, 0.3);
+                margin-top: 2px;
             }
             
             .news-content {
@@ -1981,77 +2284,58 @@ def render_html_content(
                 display: flex;
                 align-items: center;
                 gap: 8px;
-                margin-bottom: 8px;
+                margin-bottom: 4px;
                 flex-wrap: wrap;
             }
             
             .source-name {
-                color: #888;
+                color: #6b7280;
                 font-size: 12px;
                 font-weight: 500;
             }
             
             .rank-num {
-                color: #000;
-                background: #00f3ff;
-                font-size: 10px;
-                font-weight: 700;
-                padding: 2px 6px;
-                border-radius: 2px;
-                min-width: 18px;
+                color: #fff;
+                background: #9ca3af;
+                font-size: 11px;
+                font-weight: 600;
+                padding: 1px 6px;
+                border-radius: 10px;
+                min-width: 20px;
                 text-align: center;
-                box-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
             }
             
-            .rank-num.top { background: #ff0055; box-shadow: 0 0 5px rgba(255, 0, 85, 0.5); }
-            .rank-num.high { background: #ff00ff; box-shadow: 0 0 5px rgba(255, 0, 255, 0.5); }
-            
-            .time-info {
-                color: #999;
-                font-size: 11px;
-            }
-            
-            .count-info {
-                color: #00f3ff;
-                font-size: 11px;
-                font-weight: 500;
-            }
+            .rank-num.top { background: #dc2626; }
+            .rank-num.high { background: #ea580c; }
             
             .news-title {
                 font-size: 15px;
-                line-height: 1.4;
-                color: #e0e0e0;
+                line-height: 1.5;
+                color: #374151;
                 margin: 0;
             }
             
             .news-link {
-                color: #00f3ff;
+                color: #374151;
                 text-decoration: none;
-                transition: all 0.2s ease;
+                transition: color 0.2s ease;
             }
             
             .news-link:hover {
-                text-decoration: none;
-                color: #fff;
-                text-shadow: 0 0 5px #00f3ff;
-            }
-            
-            .news-link:visited {
-                color: #b026ff;
+                color: #2563eb;
             }
             
             .new-section {
                 margin-top: 40px;
                 padding-top: 24px;
-                border-top: 2px solid #333;
+                border-top: 2px solid #f3f4f6;
             }
             
             .new-section-title {
-                color: #00f3ff;
-                font-size: 16px;
+                color: #111827;
+                font-size: 18px;
                 font-weight: 600;
                 margin: 0 0 20px 0;
-                text-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
             }
             
             .new-source-group {
@@ -2059,20 +2343,20 @@ def render_html_content(
             }
             
             .new-source-title {
-                color: #888;
+                color: #6b7280;
                 font-size: 13px;
-                font-weight: 500;
+                font-weight: 600;
                 margin: 0 0 12px 0;
                 padding-bottom: 6px;
-                border-bottom: 1px solid #333;
+                border-bottom: 1px solid #e5e7eb;
             }
             
             .new-item {
                 display: flex;
-                align-items: center;
+                align-items: flex-start;
                 gap: 12px;
                 padding: 8px 0;
-                border-bottom: 1px solid #1a1a1a;
+                border-bottom: 1px solid #f3f4f6;
             }
             
             .new-item:last-child {
@@ -2080,34 +2364,26 @@ def render_html_content(
             }
             
             .new-item-number {
-                color: #00f3ff;
+                color: #9ca3af;
                 font-size: 12px;
-                font-weight: 600;
+                font-weight: 500;
                 min-width: 18px;
                 text-align: center;
                 flex-shrink: 0;
-                background: rgba(0, 243, 255, 0.1);
-                border: 1px solid #00f3ff;
-                border-radius: 50%;
-                width: 20px;
-                height: 20px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                box-shadow: 0 0 5px rgba(0, 243, 255, 0.3);
+                margin-top: 2px;
             }
             
             .new-item-rank {
-                color: #000;
-                background: #00f3ff;
+                color: #fff;
+                background: #9ca3af;
                 font-size: 10px;
-                font-weight: 700;
-                padding: 3px 6px;
-                border-radius: 2px;
-                box-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
-                min-width: 20px;
+                font-weight: 600;
+                padding: 1px 5px;
+                border-radius: 4px;
+                min-width: 18px;
                 text-align: center;
                 flex-shrink: 0;
+                margin-top: 2px;
             }
             
             .new-item-rank.top { background: #dc2626; }
@@ -2118,17 +2394,10 @@ def render_html_content(
                 min-width: 0;
             }
             
-            .new-item-title {
-                font-size: 14px;
-                line-height: 1.4;
-                color: #1a1a1a;
-                margin: 0;
-            }
-            
             .error-section {
                 background: #fef2f2;
                 border: 1px solid #fecaca;
-                border-radius: 8px;
+                border-radius: 6px;
                 padding: 16px;
                 margin-bottom: 24px;
             }
@@ -2150,13 +2419,13 @@ def render_html_content(
                 color: #991b1b;
                 font-size: 13px;
                 padding: 2px 0;
-                font-family: 'SF Mono', Consolas, monospace;
+                font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
             }
             
             .footer {
                 margin-top: 32px;
-                padding: 20px 24px;
-                background: #f8f9fa;
+                padding: 24px;
+                background: #f9fafb;
                 border-top: 1px solid #e5e7eb;
                 text-align: center;
             }
@@ -2175,18 +2444,18 @@ def render_html_content(
             }
             
             .footer-link:hover {
-                color: #7c3aed;
+                color: #4338ca;
                 text-decoration: underline;
             }
             
             .project-name {
                 font-weight: 600;
-                color: #374151;
+                color: #111827;
             }
-            
+
             @media (max-width: 480px) {
                 body { padding: 12px; }
-                .header { padding: 24px 20px; }
+                .header { padding: 24px 20px; } /* Default padding for mobile */
                 .content { padding: 20px; }
                 .footer { padding: 16px 20px; }
                 .header-info { grid-template-columns: 1fr; gap: 12px; }
@@ -2204,255 +2473,99 @@ def render_html_content(
                     flex-direction: column;
                     width: 100%;
                 }
-                .save-btn {
-                    width: 100%;
-                }
             }
         </style>
+        <script>
+            function switchTab(lang) {
+                // Update buttons
+                document.querySelectorAll('.tab-btn').forEach(btn => {
+                    btn.classList.remove('active');
+                });
+                document.getElementById('tab-btn-' + lang).classList.add('active');
+                
+                // Update content
+                document.querySelectorAll('.tab-content').forEach(content => {
+                    content.style.display = 'none';
+                });
+                document.getElementById('content-' + lang).style.display = 'block';
+            }
+
+            // Initialize tabs if JS is enabled
+            document.addEventListener('DOMContentLoaded', function() {
+                // Show tabs container
+                var tabs = document.querySelector('.tabs');
+                if (tabs) {
+                    tabs.style.display = 'flex';
+                }
+
+                // Adjust header padding
+                var header = document.querySelector('.header');
+                if (header) {
+                    // Check if mobile
+                    if (window.innerWidth <= 480) {
+                        header.style.paddingBottom = '80px';
+                    } else {
+                        header.style.paddingBottom = '80px';
+                    }
+                }
+
+                // Hide English content initially
+                var enContent = document.getElementById('content-en');
+                if (enContent) {
+                    enContent.style.display = 'none';
+                }
+            });
+        </script>
     </head>
-    <body>
-        <div class="container">
+    <body>"""
+
+    html += f"""
+        <div class="container" id="capture">
             <div class="header">
                 <div class="save-buttons">
-                    <button class="save-btn" onclick="saveAsImage()">保存为图片</button>
-                    <button class="save-btn" onclick="saveAsMultipleImages()">分段保存</button>
+                    <button class="save-btn" onclick="saveAsImage()" id="saveBtn">保存图片</button>
+                    <button class="save-btn" onclick="downloadJson()" id="jsonBtn">下载JSON</button>
                 </div>
-                <div class="header-title">热点新闻分析</div>
+                <h1 class="header-title">TrendRadar 热点分析</h1>
                 <div class="header-info">
                     <div class="info-item">
                         <span class="info-label">报告类型</span>
-                        <span class="info-value">"""
-
-    # 处理报告类型显示
-    if is_daily_summary:
-        if mode == "current":
-            html += "当前榜单"
-        elif mode == "incremental":
-            html += "增量模式"
-        else:
-            html += "当日汇总"
-    else:
-        html += "实时分析"
-
-    html += """</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">新闻总数</span>
-                        <span class="info-value">"""
-
-    html += f"{total_titles} 条"
-
-    # 计算筛选后的热点新闻数量
-    hot_news_count = sum(len(stat["titles"]) for stat in report_data["stats"])
-
-    html += """</span>
-                    </div>
-                    <div class="info-item">
-                        <span class="info-label">热点新闻</span>
-                        <span class="info-value">"""
-
-    html += f"{hot_news_count} 条"
-
-    html += """</span>
+                        <span class="info-value">{report_data['report_type']}</span>
                     </div>
                     <div class="info-item">
                         <span class="info-label">生成时间</span>
-                        <span class="info-value">"""
-
-    now = get_beijing_time()
-    html += now.strftime("%m-%d %H:%M")
-
-    html += """</span>
+                        <span class="info-value">{report_data['generated_time']}</span>
                     </div>
+                </div>
+                
+                <div class="tabs">
+                    <button class="tab-btn active" id="tab-btn-cn" onclick="switchTab('cn')">中文热点</button>
+                    <button class="tab-btn" id="tab-btn-en" onclick="switchTab('en')">Global News</button>
                 </div>
             </div>
             
-            <div class="content">"""
-
-    # 处理失败ID错误信息
-    if report_data["failed_ids"]:
-        html += """
-                <div class="error-section">
-                    <div class="error-title">⚠️ 请求失败的平台</div>
-                    <ul class="error-list">"""
-        for id_value in report_data["failed_ids"]:
-            html += f'<li class="error-item">{html_escape(id_value)}</li>'
-        html += """
-                    </ul>
-                </div>"""
-
-    # 处理主要统计数据
-    if report_data["stats"]:
-        total_count = len(report_data["stats"])
-
-        for i, stat in enumerate(report_data["stats"], 1):
-            count = stat["count"]
-
-            # 确定热度等级
-            if count >= 10:
-                count_class = "hot"
-            elif count >= 5:
-                count_class = "warm"
-            else:
-                count_class = ""
-
-            escaped_word = html_escape(stat["word"])
-
-            html += f"""
-                <div class="word-group">
-                    <div class="word-header">
-                        <div class="word-info">
-                            <div class="word-name">{escaped_word}</div>
-                            <div class="word-count {count_class}">{count} 条</div>
-                        </div>
-                        <div class="word-index">{i}/{total_count}</div>
-                    </div>"""
-
-            # 处理每个词组下的新闻标题，给每条新闻标上序号
-            for j, title_data in enumerate(stat["titles"], 1):
-                is_new = title_data.get("is_new", False)
-                new_class = "new" if is_new else ""
-
-                html += f"""
-                    <div class="news-item {new_class}">
-                        <div class="news-number">{j}</div>
-                        <div class="news-content">
-                            <div class="news-header">
-                                <span class="source-name">{html_escape(title_data["source_name"])}</span>"""
-
-                # 处理排名显示
-                ranks = title_data.get("ranks", [])
-                if ranks:
-                    min_rank = min(ranks)
-                    max_rank = max(ranks)
-                    rank_threshold = title_data.get("rank_threshold", 10)
-
-                    # 确定排名等级
-                    if min_rank <= 3:
-                        rank_class = "top"
-                    elif min_rank <= rank_threshold:
-                        rank_class = "high"
-                    else:
-                        rank_class = ""
-
-                    if min_rank == max_rank:
-                        rank_text = str(min_rank)
-                    else:
-                        rank_text = f"{min_rank}-{max_rank}"
-
-                    html += f'<span class="rank-num {rank_class}">{rank_text}</span>'
-
-                # 处理时间显示
-                time_display = title_data.get("time_display", "")
-                if time_display:
-                    # 简化时间显示格式，将波浪线替换为~
-                    simplified_time = (
-                        time_display.replace(" ~ ", "~")
-                        .replace("[", "")
-                        .replace("]", "")
-                    )
-                    html += (
-                        f'<span class="time-info">{html_escape(simplified_time)}</span>'
-                    )
-
-                # 处理出现次数
-                count_info = title_data.get("count", 1)
-                if count_info > 1:
-                    html += f'<span class="count-info">{count_info}次</span>'
-
-                html += """
-                            </div>
-                            <div class="news-title">"""
-
-                # 处理标题和链接
-                escaped_title = html_escape(title_data["title"])
-                link_url = title_data.get("mobile_url") or title_data.get("url", "")
-
-                if link_url:
-                    escaped_url = html_escape(link_url)
-                    html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
-                else:
-                    html += escaped_title
-
-                html += """
-                            </div>
-                        </div>
-                    </div>"""
-
-            html += """
-                </div>"""
-
-    # 处理新增新闻区域
-    if report_data["new_titles"]:
-        html += f"""
-                <div class="new-section">
-                    <div class="new-section-title">本次新增热点 (共 {report_data['total_new_count']} 条)</div>"""
-
-        for source_data in report_data["new_titles"]:
-            escaped_source = html_escape(source_data["source_name"])
-            titles_count = len(source_data["titles"])
-
-            html += f"""
-                    <div class="new-source-group">
-                        <div class="new-source-title">{escaped_source} · {titles_count}条</div>"""
-
-            # 为新增新闻也添加序号
-            for idx, title_data in enumerate(source_data["titles"], 1):
-                ranks = title_data.get("ranks", [])
-
-                # 处理新增新闻的排名显示
-                rank_class = ""
-                if ranks:
-                    min_rank = min(ranks)
-                    if min_rank <= 3:
-                        rank_class = "top"
-                    elif min_rank <= title_data.get("rank_threshold", 10):
-                        rank_class = "high"
-
-                    if len(ranks) == 1:
-                        rank_text = str(ranks[0])
-                    else:
-                        rank_text = f"{min(ranks)}-{max(ranks)}"
-                else:
-                    rank_text = "?"
-
-                html += f"""
-                        <div class="new-item">
-                            <div class="new-item-number">{idx}</div>
-                            <div class="new-item-rank {rank_class}">{rank_text}</div>
-                            <div class="new-item-content">
-                                <div class="new-item-title">"""
-
-                # 处理新增新闻的链接
-                escaped_title = html_escape(title_data["title"])
-                link_url = title_data.get("mobile_url") or title_data.get("url", "")
-
-                if link_url:
-                    escaped_url = html_escape(link_url)
-                    html += f'<a href="{escaped_url}" target="_blank" class="news-link">{escaped_title}</a>'
-                else:
-                    html += escaped_title
-
-                html += """
-                                </div>
-                            </div>
-                        </div>"""
-
-            html += """
-                    </div>"""
-
-        html += """
-                </div>"""
-
-    html += """
+            <div class="content">
+                <div id="content-cn" class="tab-content active">
+                    {_render_word_groups(report_data.get('cn_groups', []), total_titles)}
+                    {_render_new_section(report_data.get('cn_new', {}))}
+                </div>
+                <div id="content-en" class="tab-content">
+                    {_render_word_groups(report_data.get('en_groups', []), total_titles)}
+                    {_render_new_section(report_data.get('en_new', {}))}
+                </div>
             </div>
-            
+        </div>
+
+    """
+    html += """
             <div class="footer">
                 <div class="footer-content">
                     由 <span class="project-name">TrendRadar</span> 生成 · 
                     <a href="https://github.com/sansan0/TrendRadar" target="_blank" class="footer-link">
                         GitHub 开源项目
                     </a>"""
+            
+
 
     if update_info:
         html += f"""
@@ -3437,7 +3550,7 @@ def send_to_notifications(
     proxy_url: Optional[str] = None,
     mode: str = "daily",
     html_file_path: Optional[str] = None,
-    json_file_path: Optional[str] = None,
+    json_files: Optional[List[str]] = None,
 ) -> Dict[str, bool]:
     """发送数据到多个通知平台"""
     results = {}
@@ -3556,7 +3669,7 @@ def send_to_notifications(
             html_file_path,
             email_smtp_server,
             email_smtp_port,
-            json_file_path,
+            attachment_paths=json_files,
         )
 
     if not results:
@@ -3951,7 +4064,7 @@ def send_to_email(
     html_file_path: str,
     custom_smtp_server: Optional[str] = None,
     custom_smtp_port: Optional[int] = None,
-    json_file_path: Optional[str] = None,
+    attachment_paths: Optional[List[str]] = None,
 ) -> bool:
     """发送邮件通知"""
     try:
@@ -4027,19 +4140,21 @@ TrendRadar 热点分析报告
         html_part = MIMEText(html_content, "html", "utf-8")
         msg.attach(html_part)
 
-        # 添加 JSON 附件
-        if json_file_path and Path(json_file_path).exists():
-            try:
-                with open(json_file_path, "rb") as f:
-                    json_part = MIMEApplication(f.read(), _subtype="json")
-                    filename = Path(json_file_path).name
-                    json_part.add_header(
-                        "Content-Disposition", "attachment", filename=filename
-                    )
-                    msg.attach(json_part)
-                print(f"已添加附件: {filename}")
-            except Exception as e:
-                print(f"添加附件失败: {e}")
+        # 添加附件
+        if attachment_paths:
+            for file_path in attachment_paths:
+                if file_path and Path(file_path).exists():
+                    try:
+                        with open(file_path, "rb") as f:
+                            part = MIMEApplication(f.read(), _subtype="octet-stream")
+                            filename = Path(file_path).name
+                            part.add_header(
+                                "Content-Disposition", "attachment", filename=filename
+                            )
+                            msg.attach(part)
+                            print(f"已添加附件: {filename}")
+                    except Exception as e:
+                        print(f"添加附件失败 {file_path}: {e}")
 
         print(f"正在发送邮件到 {to_email}...")
         print(f"SMTP 服务器: {smtp_server}:{smtp_port}")
@@ -4643,7 +4758,7 @@ class NewsAnalyzer:
         id_to_name: Dict,
         failed_ids: Optional[List] = None,
         is_daily_summary: bool = False,
-    ) -> Tuple[List[Dict], str]:
+    ) -> Tuple[List[Dict], str, List[str]]:
         """统一的分析流水线：数据处理 → 统计计算 → HTML生成"""
 
         # 统计计算
@@ -4671,7 +4786,7 @@ class NewsAnalyzer:
         )
         
         # JSON生成
-        json_file = generate_json_report(
+        json_files = generate_json_report(
             stats,
             total_titles,
             failed_ids=failed_ids,
@@ -4682,7 +4797,7 @@ class NewsAnalyzer:
             update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
         )
 
-        return stats, html_file, json_file
+        return stats, html_file, json_files
 
     def _send_notification_if_needed(
         self,
@@ -4693,7 +4808,7 @@ class NewsAnalyzer:
         new_titles: Optional[Dict] = None,
         id_to_name: Optional[Dict] = None,
         html_file_path: Optional[str] = None,
-        json_file_path: Optional[str] = None,
+        json_files: Optional[List[str]] = None,
     ) -> bool:
         """统一的通知发送逻辑，包含所有判断条件"""
         has_notification = self._has_notification_configured()
@@ -4713,7 +4828,7 @@ class NewsAnalyzer:
                 self.proxy_url,
                 mode=mode,
                 html_file_path=html_file_path,
-                json_file_path=json_file_path,
+                json_files=json_files,
             )
             return True
         elif CONFIG["ENABLE_NOTIFICATION"] and not has_notification:
@@ -4754,7 +4869,7 @@ class NewsAnalyzer:
         )
 
         # 运行分析流水线
-        stats, html_file, json_file = self._run_analysis_pipeline(
+        stats, html_file, json_files = self._run_analysis_pipeline(
             all_results,
             mode_strategy["summary_mode"],
             title_info,
@@ -4776,7 +4891,7 @@ class NewsAnalyzer:
             new_titles=new_titles,
             id_to_name=id_to_name,
             html_file_path=html_file,
-            json_file_path=json_file,
+            json_files=json_files,
         )
 
         return html_file
@@ -4833,12 +4948,7 @@ class NewsAnalyzer:
 
     def _crawl_data(self) -> Tuple[Dict, Dict, List]:
         """执行数据爬取"""
-        ids = []
-        for platform in CONFIG["PLATFORMS"]:
-            if "name" in platform:
-                ids.append((platform["id"], platform["name"]))
-            else:
-                ids.append(platform["id"])
+
 
         print(
             f"配置的监控平台: {[p.get('name', p['id']) for p in CONFIG['PLATFORMS']]}"
@@ -4847,7 +4957,7 @@ class NewsAnalyzer:
         ensure_directory_exists("output")
 
         results, id_to_name, failed_ids = self.data_fetcher.crawl_websites(
-            ids, self.request_interval
+            CONFIG["PLATFORMS"], self.request_interval
         )
 
         title_file = save_titles_to_file(results, id_to_name, failed_ids)
@@ -4884,7 +4994,7 @@ class NewsAnalyzer:
                     f"current模式：使用过滤后的历史数据，包含平台：{list(all_results.keys())}"
                 )
 
-                stats, html_file, json_file = self._run_analysis_pipeline(
+                stats, html_file, json_files = self._run_analysis_pipeline(
                     all_results,
                     self.report_mode,
                     historical_title_info,
@@ -4910,14 +5020,14 @@ class NewsAnalyzer:
                         new_titles=historical_new_titles,
                         id_to_name=combined_id_to_name,
                         html_file_path=html_file,
-                        json_file_path=json_file,
+                        json_files=json_files,
                     )
             else:
                 print("❌ 严重错误：无法读取刚保存的数据文件")
                 raise RuntimeError("数据一致性检查失败：保存后立即读取失败")
         else:
             title_info = self._prepare_current_title_info(results, time_info)
-            stats, html_file, json_file = self._run_analysis_pipeline(
+            stats, html_file, json_files = self._run_analysis_pipeline(
                 results,
                 self.report_mode,
                 title_info,
@@ -4940,7 +5050,7 @@ class NewsAnalyzer:
                     new_titles=new_titles,
                     id_to_name=id_to_name,
                     html_file_path=html_file,
-                    json_file_path=json_file,
+                    json_files=json_files,
                 )
 
 
