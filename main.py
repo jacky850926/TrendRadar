@@ -9,6 +9,7 @@ import webbrowser
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.mime.application import MIMEApplication
 from email.header import Header
 from email.utils import formataddr, formatdate, make_msgid
 from datetime import datetime
@@ -1709,10 +1710,46 @@ def generate_html_report(
     with open(file_path, "w", encoding="utf-8") as f:
         f.write(html_content)
 
+    return file_path
+
+
+def generate_json_report(
+    stats: List[Dict],
+    total_titles: int,
+    failed_ids: Optional[List] = None,
+    new_titles: Optional[Dict] = None,
+    id_to_name: Optional[Dict] = None,
+    mode: str = "daily",
+    is_daily_summary: bool = False,
+    update_info: Optional[Dict] = None,
+) -> str:
+    """生成JSON报告"""
     if is_daily_summary:
-        root_file_path = Path("index.html")
-        with open(root_file_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
+        if mode == "current":
+            filename = "当前榜单汇总.json"
+        elif mode == "incremental":
+            filename = "当日增量.json"
+        else:
+            filename = "当日汇总.json"
+    else:
+        filename = f"{format_time_filename()}.json"
+
+    file_path = get_output_path("json", filename)
+    ensure_directory_exists(str(Path(file_path).parent))
+
+    report_data = prepare_report_data(stats, failed_ids, new_titles, id_to_name, mode)
+    
+    # 添加额外元数据
+    report_data["meta"] = {
+        "generated_at": get_beijing_time().strftime("%Y-%m-%d %H:%M:%S"),
+        "total_titles": total_titles,
+        "mode": mode,
+        "is_daily_summary": is_daily_summary,
+        "version": VERSION
+    }
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(report_data, f, ensure_ascii=False, indent=2)
 
     return file_path
 
@@ -1736,29 +1773,32 @@ def render_html_content(
         <style>
             * { box-sizing: border-box; }
             body { 
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+                font-family: 'Courier New', Courier, monospace;
                 margin: 0; 
                 padding: 16px; 
-                background: #fafafa;
-                color: #333;
+                background: #050505;
+                color: #00f3ff;
                 line-height: 1.5;
             }
             
             .container {
                 max-width: 600px;
                 margin: 0 auto;
-                background: white;
-                border-radius: 12px;
+                background: #0a0a0a;
+                border: 1px solid #00f3ff;
+                border-radius: 4px;
                 overflow: hidden;
-                box-shadow: 0 2px 16px rgba(0,0,0,0.06);
+                box-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
             }
             
             .header {
-                background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 100%);
-                color: white;
+                background: linear-gradient(135deg, #000000 0%, #1a1a1a 100%);
+                border-bottom: 2px solid #ff00ff;
+                color: #ff00ff;
                 padding: 32px 24px;
                 text-align: center;
                 position: relative;
+                text-shadow: 0 0 10px rgba(255, 0, 255, 0.5);
             }
             
             .save-buttons {
@@ -1770,11 +1810,11 @@ def render_html_content(
             }
             
             .save-btn {
-                background: rgba(255, 255, 255, 0.2);
-                border: 1px solid rgba(255, 255, 255, 0.3);
-                color: white;
+                background: rgba(0, 0, 0, 0.8);
+                border: 1px solid #00f3ff;
+                color: #00f3ff;
                 padding: 8px 16px;
-                border-radius: 6px;
+                border-radius: 2px;
                 cursor: pointer;
                 font-size: 13px;
                 font-weight: 500;
@@ -1784,8 +1824,8 @@ def render_html_content(
             }
             
             .save-btn:hover {
-                background: rgba(255, 255, 255, 0.3);
-                border-color: rgba(255, 255, 255, 0.5);
+                background: rgba(0, 243, 255, 0.1);
+                box-shadow: 0 0 10px rgba(0, 243, 255, 0.3);
                 transform: translateY(-1px);
             }
             
@@ -1826,6 +1866,8 @@ def render_html_content(
             .info-value {
                 font-weight: 600;
                 font-size: 16px;
+                color: #fff;
+                text-shadow: 0 0 5px rgba(255, 255, 255, 0.5);
             }
             
             .content {
@@ -1846,7 +1888,7 @@ def render_html_content(
                 justify-content: space-between;
                 margin-bottom: 20px;
                 padding-bottom: 8px;
-                border-bottom: 1px solid #f0f0f0;
+                border-bottom: 1px solid #333;
             }
             
             .word-info {
@@ -1858,27 +1900,28 @@ def render_html_content(
             .word-name {
                 font-size: 17px;
                 font-weight: 600;
-                color: #1a1a1a;
+                color: #00f3ff;
+                text-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
             }
             
             .word-count {
-                color: #666;
+                color: #ff00ff;
                 font-size: 13px;
                 font-weight: 500;
             }
             
-            .word-count.hot { color: #dc2626; font-weight: 600; }
-            .word-count.warm { color: #ea580c; font-weight: 600; }
+            .word-count.hot { color: #ff0055; font-weight: 600; text-shadow: 0 0 5px rgba(255, 0, 85, 0.5); }
+            .word-count.warm { color: #ff00ff; font-weight: 600; }
             
             .word-index {
-                color: #999;
+                color: #666;
                 font-size: 12px;
             }
             
             .news-item {
                 margin-bottom: 20px;
                 padding: 16px 0;
-                border-bottom: 1px solid #f5f5f5;
+                border-bottom: 1px solid #1a1a1a;
                 position: relative;
                 display: flex;
                 gap: 12px;
@@ -1894,23 +1937,25 @@ def render_html_content(
                 position: absolute;
                 top: 12px;
                 right: 0;
-                background: #fbbf24;
-                color: #92400e;
+                background: #ff00ff;
+                color: #000;
                 font-size: 9px;
                 font-weight: 700;
                 padding: 3px 6px;
-                border-radius: 4px;
+                border-radius: 2px;
                 letter-spacing: 0.5px;
+                box-shadow: 0 0 10px rgba(255, 0, 255, 0.5);
             }
             
             .news-number {
-                color: #999;
+                color: #00f3ff;
                 font-size: 13px;
                 font-weight: 600;
                 min-width: 20px;
                 text-align: center;
                 flex-shrink: 0;
-                background: #f8f9fa;
+                background: rgba(0, 243, 255, 0.1);
+                border: 1px solid #00f3ff;
                 border-radius: 50%;
                 width: 24px;
                 height: 24px;
@@ -1919,6 +1964,7 @@ def render_html_content(
                 justify-content: center;
                 align-self: flex-start;
                 margin-top: 8px;
+                box-shadow: 0 0 5px rgba(0, 243, 255, 0.3);
             }
             
             .news-content {
@@ -1940,24 +1986,25 @@ def render_html_content(
             }
             
             .source-name {
-                color: #666;
+                color: #888;
                 font-size: 12px;
                 font-weight: 500;
             }
             
             .rank-num {
-                color: #fff;
-                background: #6b7280;
+                color: #000;
+                background: #00f3ff;
                 font-size: 10px;
                 font-weight: 700;
                 padding: 2px 6px;
-                border-radius: 10px;
+                border-radius: 2px;
                 min-width: 18px;
                 text-align: center;
+                box-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
             }
             
-            .rank-num.top { background: #dc2626; }
-            .rank-num.high { background: #ea580c; }
+            .rank-num.top { background: #ff0055; box-shadow: 0 0 5px rgba(255, 0, 85, 0.5); }
+            .rank-num.high { background: #ff00ff; box-shadow: 0 0 5px rgba(255, 0, 255, 0.5); }
             
             .time-info {
                 color: #999;
@@ -1965,7 +2012,7 @@ def render_html_content(
             }
             
             .count-info {
-                color: #059669;
+                color: #00f3ff;
                 font-size: 11px;
                 font-weight: 500;
             }
@@ -1973,34 +2020,38 @@ def render_html_content(
             .news-title {
                 font-size: 15px;
                 line-height: 1.4;
-                color: #1a1a1a;
+                color: #e0e0e0;
                 margin: 0;
             }
             
             .news-link {
-                color: #2563eb;
+                color: #00f3ff;
                 text-decoration: none;
+                transition: all 0.2s ease;
             }
             
             .news-link:hover {
-                text-decoration: underline;
+                text-decoration: none;
+                color: #fff;
+                text-shadow: 0 0 5px #00f3ff;
             }
             
             .news-link:visited {
-                color: #7c3aed;
+                color: #b026ff;
             }
             
             .new-section {
                 margin-top: 40px;
                 padding-top: 24px;
-                border-top: 2px solid #f0f0f0;
+                border-top: 2px solid #333;
             }
             
             .new-section-title {
-                color: #1a1a1a;
+                color: #00f3ff;
                 font-size: 16px;
                 font-weight: 600;
                 margin: 0 0 20px 0;
+                text-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
             }
             
             .new-source-group {
@@ -2008,12 +2059,12 @@ def render_html_content(
             }
             
             .new-source-title {
-                color: #666;
+                color: #888;
                 font-size: 13px;
                 font-weight: 500;
                 margin: 0 0 12px 0;
                 padding-bottom: 6px;
-                border-bottom: 1px solid #f5f5f5;
+                border-bottom: 1px solid #333;
             }
             
             .new-item {
@@ -2021,7 +2072,7 @@ def render_html_content(
                 align-items: center;
                 gap: 12px;
                 padding: 8px 0;
-                border-bottom: 1px solid #f9f9f9;
+                border-bottom: 1px solid #1a1a1a;
             }
             
             .new-item:last-child {
@@ -2029,28 +2080,31 @@ def render_html_content(
             }
             
             .new-item-number {
-                color: #999;
+                color: #00f3ff;
                 font-size: 12px;
                 font-weight: 600;
                 min-width: 18px;
                 text-align: center;
                 flex-shrink: 0;
-                background: #f8f9fa;
+                background: rgba(0, 243, 255, 0.1);
+                border: 1px solid #00f3ff;
                 border-radius: 50%;
                 width: 20px;
                 height: 20px;
                 display: flex;
                 align-items: center;
                 justify-content: center;
+                box-shadow: 0 0 5px rgba(0, 243, 255, 0.3);
             }
             
             .new-item-rank {
-                color: #fff;
-                background: #6b7280;
+                color: #000;
+                background: #00f3ff;
                 font-size: 10px;
                 font-weight: 700;
                 padding: 3px 6px;
-                border-radius: 8px;
+                border-radius: 2px;
+                box-shadow: 0 0 5px rgba(0, 243, 255, 0.5);
                 min-width: 20px;
                 text-align: center;
                 flex-shrink: 0;
@@ -3383,6 +3437,7 @@ def send_to_notifications(
     proxy_url: Optional[str] = None,
     mode: str = "daily",
     html_file_path: Optional[str] = None,
+    json_file_path: Optional[str] = None,
 ) -> Dict[str, bool]:
     """发送数据到多个通知平台"""
     results = {}
@@ -3501,6 +3556,7 @@ def send_to_notifications(
             html_file_path,
             email_smtp_server,
             email_smtp_port,
+            json_file_path,
         )
 
     if not results:
@@ -3895,6 +3951,7 @@ def send_to_email(
     html_file_path: str,
     custom_smtp_server: Optional[str] = None,
     custom_smtp_port: Optional[int] = None,
+    json_file_path: Optional[str] = None,
 ) -> bool:
     """发送邮件通知"""
     try:
@@ -3969,6 +4026,20 @@ TrendRadar 热点分析报告
 
         html_part = MIMEText(html_content, "html", "utf-8")
         msg.attach(html_part)
+
+        # 添加 JSON 附件
+        if json_file_path and Path(json_file_path).exists():
+            try:
+                with open(json_file_path, "rb") as f:
+                    json_part = MIMEApplication(f.read(), _subtype="json")
+                    filename = Path(json_file_path).name
+                    json_part.add_header(
+                        "Content-Disposition", "attachment", filename=filename
+                    )
+                    msg.attach(json_part)
+                print(f"已添加附件: {filename}")
+            except Exception as e:
+                print(f"添加附件失败: {e}")
 
         print(f"正在发送邮件到 {to_email}...")
         print(f"SMTP 服务器: {smtp_server}:{smtp_port}")
@@ -4598,8 +4669,20 @@ class NewsAnalyzer:
             is_daily_summary=is_daily_summary,
             update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
         )
+        
+        # JSON生成
+        json_file = generate_json_report(
+            stats,
+            total_titles,
+            failed_ids=failed_ids,
+            new_titles=new_titles,
+            id_to_name=id_to_name,
+            mode=mode,
+            is_daily_summary=is_daily_summary,
+            update_info=self.update_info if CONFIG["SHOW_VERSION_UPDATE"] else None,
+        )
 
-        return stats, html_file
+        return stats, html_file, json_file
 
     def _send_notification_if_needed(
         self,
@@ -4610,6 +4693,7 @@ class NewsAnalyzer:
         new_titles: Optional[Dict] = None,
         id_to_name: Optional[Dict] = None,
         html_file_path: Optional[str] = None,
+        json_file_path: Optional[str] = None,
     ) -> bool:
         """统一的通知发送逻辑，包含所有判断条件"""
         has_notification = self._has_notification_configured()
@@ -4629,6 +4713,7 @@ class NewsAnalyzer:
                 self.proxy_url,
                 mode=mode,
                 html_file_path=html_file_path,
+                json_file_path=json_file_path,
             )
             return True
         elif CONFIG["ENABLE_NOTIFICATION"] and not has_notification:
@@ -4669,7 +4754,7 @@ class NewsAnalyzer:
         )
 
         # 运行分析流水线
-        stats, html_file = self._run_analysis_pipeline(
+        stats, html_file, json_file = self._run_analysis_pipeline(
             all_results,
             mode_strategy["summary_mode"],
             title_info,
@@ -4691,6 +4776,7 @@ class NewsAnalyzer:
             new_titles=new_titles,
             id_to_name=id_to_name,
             html_file_path=html_file,
+            json_file_path=json_file,
         )
 
         return html_file
@@ -4710,7 +4796,7 @@ class NewsAnalyzer:
         )
 
         # 运行分析流水线
-        _, html_file = self._run_analysis_pipeline(
+        _, html_file, _ = self._run_analysis_pipeline(
             all_results,
             mode,
             title_info,
@@ -4798,7 +4884,7 @@ class NewsAnalyzer:
                     f"current模式：使用过滤后的历史数据，包含平台：{list(all_results.keys())}"
                 )
 
-                stats, html_file = self._run_analysis_pipeline(
+                stats, html_file, json_file = self._run_analysis_pipeline(
                     all_results,
                     self.report_mode,
                     historical_title_info,
@@ -4824,13 +4910,14 @@ class NewsAnalyzer:
                         new_titles=historical_new_titles,
                         id_to_name=combined_id_to_name,
                         html_file_path=html_file,
+                        json_file_path=json_file,
                     )
             else:
                 print("❌ 严重错误：无法读取刚保存的数据文件")
                 raise RuntimeError("数据一致性检查失败：保存后立即读取失败")
         else:
             title_info = self._prepare_current_title_info(results, time_info)
-            stats, html_file = self._run_analysis_pipeline(
+            stats, html_file, json_file = self._run_analysis_pipeline(
                 results,
                 self.report_mode,
                 title_info,
@@ -4853,7 +4940,9 @@ class NewsAnalyzer:
                     new_titles=new_titles,
                     id_to_name=id_to_name,
                     html_file_path=html_file,
+                    json_file_path=json_file,
                 )
+
 
         # 生成汇总报告（如果需要）
         summary_html = None

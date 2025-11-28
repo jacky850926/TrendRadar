@@ -1,0 +1,98 @@
+# 核心配置
+enable_crawler: true # 是否启用爬虫
+enable_notification: true # 是否启用通知
+report_mode: "daily" # 报告模式：daily(当日汇总), incremental(增量模式), current(当前榜单)
+sort_by_position_first: true # 是否优先按排名排序（true: 排名优先，false: 热度优先）
+max_news_per_keyword: 5 # 每个关键词组最多显示几条新闻（0表示不限制）
+
+# 代理配置
+use_proxy: false # 是否使用代理
+default_proxy: "http://127.0.0.1:7890" # 默认代理地址
+
+# 自动更新配置
+show_version_update: true # 是否在报告中显示版本更新信息
+version_check_url: "https://api.github.com/repos/wantcat/TrendRadar/releases/latest" # 版本检查地址
+
+# 推送时间窗口配置
+push_window:
+  enabled: false # 是否启用推送时间窗口限制
+  time_range:
+    start: "09:00" # 允许推送的开始时间
+    end: "22:00" # 允许推送的结束时间
+  once_per_day: false # 是否每天只在窗口内推送一次（仅针对incremental和current模式）
+  retention_days: 7 # 推送记录保留天数
+
+# 监控平台配置
+platforms:
+  - id: "weibo"
+    name: "微博"
+    enabled: true
+    url: "https://s.weibo.com/top/summary"
+  - id: "toutiao"
+    name: "头条"
+    enabled: true
+    url: "https://www.toutiao.com/hot-event/hot-board/?origin=toutiao_pc"
+  - id: "zhihu"
+    name: "知乎"
+    enabled: true
+    url: "https://www.zhihu.com/billboard"
+  - id: "baidu"
+    name: "百度"
+    enabled: true
+    url: "https://top.baidu.com/board?tab=realtime"
+  - id: "bilibili"
+    name: "B站"
+    enabled: true
+    url: "https://api.bilibili.com/x/web-interface/ranking/v2?rid=0&type=all"
+  - id: "36kr"
+    name: "36氪"
+    enabled: true
+    url: "https://36kr.com/hot-list/catalog"
+  - id: "sspai"
+    name: "少数派"
+    enabled: true
+    url: "https://sspai.com/api/v1/article/tag/page/get?limit=20&tag=热门文章"
+  - id: "ithome"
+    name: "IT之家"
+    enabled: true
+    url: "https://m.ithome.com/rankm/"
+  - id: "juejin"
+    name: "掘金"
+    enabled: true
+    url: "https://api.juejin.cn/content_api/v1/content/article_rank?category_id=1&type=hot"
+  - id: "tieba"
+    name: "贴吧"
+    enabled: true
+    url: "https://tieba.baidu.com/hottopic/browse/topicList"
+  - id: "thepaper"
+    name: "澎湃"
+    enabled: true
+    url: "https://www.thepaper.cn/"
+  - id: "qq"
+    name: "腾讯"
+    enabled: true
+    url: "https://r.inews.qq.com/gw/event/hot_ranking_list?ids_hash=&offset=0&page_size=50"
+
+# 通知渠道配置
+notifications:
+  feishu_webhook_url: "" # 飞书 Webhook URL
+  dingtalk_webhook_url: "" # 钉钉 Webhook URL
+  wework_webhook_url: "" # 企业微信 Webhook URL
+  wework_msg_type: "markdown" # 企业微信消息类型：markdown(群机器人) 或 text(个人微信应用)
+  telegram_bot_token: "" # Telegram Bot Token
+  telegram_chat_id: "" # Telegram Chat ID
+  email_from: "" # 发件人邮箱地址
+  email_password: "" # 发件人邮箱密码或授权码
+  email_to: "" # 收件人邮箱地址，多个收件人用逗号分隔
+  email_smtp_server: "" # SMTP服务器地址（可选，留空自动识别）
+  email_smtp_port: "" # SMTP端口（可选，留空自动识别）
+  ntfy_server_url: "https://ntfy.sh" # ntfy服务器地址，默认使用公共服务，可改为自托管地址
+  ntfy_topic: "" # ntfy订阅主题
+  ntfy_token: "" # ntfy访问令牌（如果是私有主题需要）
+  bark_url: "" # Bark推送地址 (例如: https://api.day.app/YOUR_KEY/)
+  slack_webhook_url: "" # Slack Webhook URL
+
+# 请求配置
+request_interval: 60 # 请求间隔(秒)
+rank_threshold: 20 # 排名阈值(只关注前N名)
+batch_send_interval: 1 # 消息分批发送间隔(秒)

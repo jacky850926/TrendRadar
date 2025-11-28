@@ -1,12 +1,13 @@
 services:
   trend-radar:
     image: wantcat/trendradar:latest
-    container_name: trend-radar
+    container_name: trend-radar-jackyma
     restart: unless-stopped
 
     volumes:
       - ../config:/app/config:ro
       - ../output:/app/output
+      - ../main.py:/app/main.py
 
     environment:
       - TZ=Asia/Shanghai

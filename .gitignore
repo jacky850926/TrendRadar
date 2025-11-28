@@ -1,0 +1,16 @@
+# Config
+config/config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# Docker
+docker/output/
+output/
+
+# OS
+.DS_Store
